@@ -1,0 +1,41 @@
+name: FalkosKampf
+on:
+  workflow_dispatch:
+  push:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHONUTF8: '1'
+  VCPKG_DISABLE_METRICS: '1'
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install CMake
+        run: python -m pip install cmake==4.2.3
+      - name: Build plugin and package
+        run: python scripts/build_windows.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FalkosKampf-Build-Logs
+          path: |
+            out/logs
+            _work/build/vcpkg-manifest-install.log
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: FalkosKampf-MO2-ohne-Animation
+          path: out/FalkosKampf-MO2.zip
+          if-no-files-found: error
