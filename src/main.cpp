@@ -121,7 +121,7 @@ namespace
 		g_hitFrame = false;
 		g_finisher = { a_target->GetHandle(), 0.0f, true };
 		if (auto* entry = FindStunned(a_target)) {
-			entry->remaining = std::max(entry->remaining, kKillFallbackSeconds + 0.5f);
+			entry->remaining = (std::max)(entry->remaining, kKillFallbackSeconds + 0.5f);
 		}
 		const bool accepted = a_player->NotifyAnimationGraph(kFinisherEvent);
 		if (accepted) {
