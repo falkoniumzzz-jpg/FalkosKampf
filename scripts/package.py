@@ -1,8 +1,7 @@
 """Package FalkosKampf for MO2.
 
-The finisher animation is a vanilla Bethesda file and is not stored in this repo.
-Pass it with --hkx (any vanilla attack .hkx, e.g. 2hm_attackleft.hkx); it is
-copied into the zip as fk_finisher.hkx next to the FNIS list.
+Everything under data/ is copied as is, including the finisher animation
+fk_finisher.hkx (a copy of vanilla 2hm_attackleft.hkx). --hkx overrides it.
 
   python scripts/package.py --dll FalkosKampf.dll --hkx 2hm_attackleft.hkx --out FalkosKampf-MO2.zip
 """
@@ -22,11 +21,11 @@ def package(dll, pdb, hkx, out):
         if pdb and Path(pdb).exists():
             z.write(pdb, "SKSE/Plugins/FalkosKampf.pdb")
         for f in sorted((ROOT / "data").rglob("*")):
-            if f.is_file():
+            if f.is_file() and not (hkx and f.name == "fk_finisher.hkx"):
                 z.write(f, f.relative_to(ROOT / "data").as_posix())
         if hkx:
             z.write(hkx, f"{ANIM_DIR}/fk_finisher.hkx")
-    print(f"wrote {out}" + ("" if hkx else " (without fk_finisher.hkx)"))
+    print(f"wrote {out}")
 
 
 if __name__ == "__main__":

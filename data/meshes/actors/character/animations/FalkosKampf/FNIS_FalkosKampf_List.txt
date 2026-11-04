@@ -1,5 +1,5 @@
 Version V0.1
 
 ' FalkosKampf test 1: finisher idle, triggered by the plugin via the event FKFinisher.
-' fk_finisher.hkx is a copy of the vanilla 2hm_attackleft.hkx (not stored in the repo).
+' fk_finisher.hkx is a copy of the vanilla 2hm_attackleft.hkx (vanilla file, kept here for personal use).
 b -a,md FKFinisher fk_finisher.hkx

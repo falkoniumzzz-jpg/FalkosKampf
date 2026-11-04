@@ -10,6 +10,7 @@ concurrency:
 env:
   PYTHONUTF8: '1'
   VCPKG_DISABLE_METRICS: '1'
+  VCPKG_BINARY_SOURCES: 'clear;files,${{ github.workspace }}/_vcpkgcache,readwrite'
 jobs:
   windows:
     runs-on: windows-2025
@@ -21,8 +22,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: _vcpkgcache
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-v1
       - name: Install CMake
-        run: python -m pip install cmake==4.2.3
+        run: |
+          python -m pip install cmake==4.2.3
+          New-Item -ItemType Directory -Force _vcpkgcache | Out-Null
       - name: Build plugin and package
         run: python scripts/build_windows.py
       - uses: actions/upload-artifact@v4
@@ -36,6 +44,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: FalkosKampf-MO2-ohne-Animation
+          name: FalkosKampf-MO2
           path: out/FalkosKampf-MO2.zip
           if-no-files-found: error

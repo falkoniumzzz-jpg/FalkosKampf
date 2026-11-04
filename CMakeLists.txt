@@ -6,13 +6,16 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
-# CommonLibSSE-NG: SE + AE only, built from source, no tests.
+# CommonLibSSE-NG v6.7.1: link the author's prebuilt Release bundle instead of
+# compiling ~30 min of source on every CI run. The bundle is only offered for the
+# all-runtimes config (SE + AE + VR); it falls back to a source build otherwise.
 set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
-set(ENABLE_SKYRIM_VR OFF CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_VR ON CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(COMMONLIB_PREBUILT OFF CACHE BOOL "" FORCE)
-set(COMMONLIB_ENABLE_IPO OFF CACHE BOOL "" FORCE)
+set(COMMONLIB_PREBUILT ON CACHE BOOL "" FORCE)
+set(COMMONLIB_PREBUILT_MULTICONFIG ON CACHE BOOL "" FORCE)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
 add_subdirectory(extern/CommonLibSSE-NG CommonLibSSE EXCLUDE_FROM_ALL)
 

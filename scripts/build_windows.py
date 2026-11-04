@@ -59,12 +59,16 @@ def main():
         "-DVCPKG_TARGET_TRIPLET=x64-windows-static-md"], env=env)
     run("build", ["cmake", "--build", build, "--config", "Release", "--target", "FalkosKampf",
         "--parallel", "4"], env=env)
+    configure_log = (OUT / "logs" / "configure.log").read_text(encoding="utf-8", errors="replace")
+    print("CommonLibSSE: " + ("prebuilt" if "linking prebuilt" in configure_log else "source build"), flush=True)
     dll = build / "Release" / "FalkosKampf.dll"
     if not dll.exists():
         raise SystemExit(f"{dll} missing")
     sys.path.insert(0, str(ROOT / "scripts"))
     from package import package
     package(dll, build / "Release" / "FalkosKampf.pdb", None, OUT / "FalkosKampf-MO2.zip")
+    import zipfile
+    print("\n".join(zipfile.ZipFile(OUT / "FalkosKampf-MO2.zip").namelist()), flush=True)
 
 
 if __name__ == "__main__":
