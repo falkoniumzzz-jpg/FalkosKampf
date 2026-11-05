@@ -1,20 +1,17 @@
-// FalkosKampf 0.2: vanilla animations in new situations.
+// FalkosKampf 0.3: vanilla animations in new situations.
 //
 // 1. A blocked melee hit staggers the attacker for a few seconds (vulnerable).
-// 2. While a vulnerable enemy is in front of the player, the OAR condition
-//    FK_RiposteReady is true, so OAR swaps the player's one-handed attack for a
-//    vanilla two-handed swing (files in OpenAnimationReplacer/FalkosKampf).
-// 3. The first player hit on a vulnerable enemy is the riposte: damage x2.
-// 4. If the riposte would kill a humanoid enemy, a vanilla paired killmove
-//    plays instead and the enemy dies at its end.
-// No Pandora/Nemesis/FNIS, no ESP.
+// 2. The first player hit on a vulnerable enemy is the riposte: damage x2,
+//    normal attack animation.
+// 3. Every player melee hit that would kill a humanoid enemy plays a vanilla
+//    paired killmove instead (100 %); the enemy dies normally at its end.
+//    The camera stays free during the killmove.
+// No Pandora/Nemesis/FNIS/OAR, no ESP.
 
 #include "PCH.h"
 
-#include "oar/OpenAnimationReplacerAPI-Conditions.h"
-
 SKSEPluginInfo(
-	.Version = REL::Version{ 0, 2, 0, 0 },
+	.Version = REL::Version{ 0, 3, 0, 0 },
 	.Name = "FalkosKampf"sv,
 	.Author = "Falko"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -26,8 +23,6 @@ namespace
 	constexpr float kRestaggerInterval = 0.35f;
 	constexpr float kStaggerMagnitude = 1.0f;
 	constexpr float kRiposteDamageMult = 2.0f;
-	constexpr float kRiposteRange = 300.0f;      // game units (about 4 m)
-	constexpr float kRiposteMaxAngle = 75.0f;    // degrees off the player's facing
 	constexpr float kKillMoveTimeout = 6.0f;     // seconds until the victim dies anyway
 	constexpr float kKillMoveNoStartTimeout = 3.0f;
 
@@ -49,7 +44,7 @@ namespace
 	std::mutex            g_lock;
 	std::vector<Stunned>  g_stunned;
 	std::vector<Finisher> g_finishers;
-	std::atomic_bool      g_riposteReady{ false };  // read by OAR on animation threads
+	bool                  g_lookUnlocked = false;  // we re-enabled looking for a killmove
 
 	std::vector<RE::TESIdleForm*> g_killMoves1H;
 	std::vector<RE::TESIdleForm*> g_killMoves2H;
@@ -92,12 +87,6 @@ namespace
 		return form ? form->As<RE::TESObjectWEAP>() : nullptr;
 	}
 
-	bool HasOneHandedMelee(RE::Actor* a_actor)
-	{
-		auto* weapon = RightHandWeapon(a_actor);
-		return weapon && (weapon->IsOneHandedSword() || weapon->IsOneHandedAxe() || weapon->IsOneHandedMace());
-	}
-
 	// ---- stagger state --------------------------------------------------
 
 	void Stagger(RE::Actor* a_actor, RE::Actor* a_source)
@@ -132,23 +121,6 @@ namespace
 		}
 		Stagger(a_attacker, player);
 		spdlog::info("Block: {} taumelt fuer {:.1f} s (verwundbar)", NameOf(a_attacker), kStunSeconds);
-	}
-
-	// Caller holds g_lock.
-	bool HasRiposteTarget(RE::PlayerCharacter* a_player)
-	{
-		for (auto& entry : g_stunned) {
-			auto actor = entry.actor.get();
-			if (!actor || actor->IsDead()) {
-				continue;
-			}
-			const float distance = a_player->GetPosition().GetDistance(actor->GetPosition());
-			const float angle = std::abs(a_player->GetHeadingAngle(actor->GetPosition(), false));
-			if (distance <= kRiposteRange && angle <= kRiposteMaxAngle) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	// ---- finisher -------------------------------------------------------
@@ -289,10 +261,28 @@ namespace
 			}
 			++it;
 		}
+	}
 
-		const bool ready = a_player->AsActorState()->IsWeaponDrawn() && HasOneHandedMelee(a_player) && HasRiposteTarget(a_player);
-		if (ready != g_riposteReady.exchange(ready)) {
-			spdlog::info("Riposte bereit: {}", ready ? "ja" : "nein");
+	// Keeps the camera free while one of our killmoves runs: leaves the VATS
+	// kill camera and re-enables looking if the killmove disabled it.
+	void KeepCameraFree()
+	{
+		auto* controls = RE::ControlMap::GetSingleton();
+		if (g_finishers.empty()) {
+			g_lookUnlocked = false;
+			return;
+		}
+		if (auto* camera = RE::PlayerCamera::GetSingleton();
+			camera && camera->IsCurrentState(RE::CameraState::kVATS, RE::CameraState::kVATS)) {
+			camera->ForceThirdPerson();
+			spdlog::info("Kamera: Killmove-Kamera verlassen, zurueck in die dritte Person");
+		}
+		if (controls && !controls->IsLookingControlsEnabled()) {
+			controls->ToggleControls(RE::ControlMap::UEFlag::kLooking, true, false);
+			if (!g_lookUnlocked) {
+				spdlog::info("Kamera: Umsehen war gesperrt, wieder freigegeben");
+			}
+			g_lookUnlocked = true;
 		}
 	}
 
@@ -301,7 +291,7 @@ namespace
 		std::scoped_lock lock(g_lock);
 		g_stunned.clear();
 		g_finishers.clear();
-		g_riposteReady = false;
+		g_lookUnlocked = false;
 	}
 
 	// ---- melee hit: riposte damage and finisher decision ----------------
@@ -310,25 +300,31 @@ namespace
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		auto attacker = a_hitData.aggressor.get();
-		if (!player || !a_victim || attacker.get() != player || a_victim->IsDead()) {
+		if (!player || !a_victim || attacker.get() != player || a_victim->IsDead() || a_victim->IsInKillMove()) {
 			return;
 		}
+
+		bool riposte = false;
 		{
 			std::scoped_lock lock(g_lock);
-			auto it = FindStunned(a_victim);
-			if (it == g_stunned.end()) {
-				return;
+			if (auto it = FindStunned(a_victim); it != g_stunned.end()) {
+				g_stunned.erase(it);  // one riposte per vulnerability
+				riposte = true;
 			}
-			g_stunned.erase(it);  // one riposte per vulnerability
+		}
+		const float base = a_hitData.totalDamage;
+		if (riposte) {
+			a_hitData.totalDamage = base * kRiposteDamageMult;
 		}
 
-		const float base = a_hitData.totalDamage;
-		const float riposte = base * kRiposteDamageMult;
 		const float health = a_victim->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
-		const bool humanoid = a_victim->HasKeywordString("ActorTypeNPC");
-		if (riposte >= health && humanoid && !a_victim->IsEssential()) {
+		const bool lethal = a_hitData.totalDamage >= health;
+		const bool canKillMove = a_victim->HasKeywordString("ActorTypeNPC") && !a_victim->IsEssential() &&
+		                         !player->IsInKillMove() && !player->IsOnMount() && g_finishers.empty();
+		if (lethal && canKillMove) {
+			spdlog::info("{}gegen {}: {:.0f} Schaden waere toedlich ({:.0f} Leben), Killmove",
+				riposte ? "Riposte " : "Treffer ", NameOf(a_victim), a_hitData.totalDamage, health);
 			a_hitData.totalDamage = 0.0f;
-			spdlog::info("Riposte gegen {}: {:.0f} Schaden waere toedlich ({:.0f} Leben), Finisher", NameOf(a_victim), riposte, health);
 			auto handle = a_victim->GetHandle();
 			SKSE::GetTaskInterface()->AddTask([handle]() {
 				if (auto victim = handle.get()) {
@@ -337,8 +333,9 @@ namespace
 			});
 			return;
 		}
-		a_hitData.totalDamage = riposte;
-		spdlog::info("Riposte gegen {}: {:.0f} -> {:.0f} Schaden ({:.0f} Leben)", NameOf(a_victim), base, riposte, health);
+		if (riposte) {
+			spdlog::info("Riposte gegen {}: {:.0f} -> {:.0f} Schaden ({:.0f} Leben)", NameOf(a_victim), base, a_hitData.totalDamage, health);
+		}
 	}
 
 	struct MeleeHitHook
@@ -371,6 +368,7 @@ namespace
 		{
 			_original(a_this, a_delta);
 			Tick(a_this, a_delta);
+			KeepCameraFree();
 		}
 
 		static void Install()
@@ -412,53 +410,9 @@ namespace
 		}
 	};
 
-	// ---- OAR condition --------------------------------------------------
-
-	class RiposteReadyCondition : public Conditions::CustomCondition
-	{
-	public:
-		constexpr static inline std::string_view CONDITION_NAME = "FK_RiposteReady"sv;
-
-		[[nodiscard]] RE::BSString GetName() const override { return CONDITION_NAME.data(); }
-		[[nodiscard]] RE::BSString GetDescription() const override
-		{
-			return "FalkosKampf: true for the player while a vulnerable enemy is in riposte range and a one-handed melee weapon is drawn."sv.data();
-		}
-		[[nodiscard]] REL::Version GetRequiredVersion() const override { return { 0, 2, 0 }; }
-		[[nodiscard]] RE::BSString GetCurrent(RE::TESObjectREFR* a_refr) const override
-		{
-			return EvaluateImpl(a_refr, nullptr, nullptr) ? "true" : "false";
-		}
-
-	protected:
-		bool EvaluateImpl(RE::TESObjectREFR* a_refr, [[maybe_unused]] RE::hkbClipGenerator* a_clipGenerator, [[maybe_unused]] void* a_subMod) const override
-		{
-			return a_refr && a_refr->IsPlayerRef() && g_riposteReady.load();
-		}
-	};
-
-	void RegisterOARCondition()
-	{
-		const auto result = OAR_API::Conditions::AddCustomCondition<RiposteReadyCondition>();
-		switch (result) {
-		case OAR_API::Conditions::APIResult::OK:
-			spdlog::info("OAR-Bedingung {} angemeldet", RiposteReadyCondition::CONDITION_NAME);
-			break;
-		case OAR_API::Conditions::APIResult::AlreadyRegistered:
-			spdlog::info("OAR-Bedingung {} war schon angemeldet", RiposteReadyCondition::CONDITION_NAME);
-			break;
-		default:
-			spdlog::error("OAR-Bedingung konnte nicht angemeldet werden (OAR fehlt oder zu alt). Riposte-Animation inaktiv.");
-			break;
-		}
-	}
-
 	void OnMessage(SKSE::MessagingInterface::Message* a_message)
 	{
 		switch (a_message->type) {
-		case SKSE::MessagingInterface::kPostLoad:
-			RegisterOARCondition();
-			break;
 		case SKSE::MessagingInterface::kDataLoaded:
 			RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(HitSink::GetSingleton());
 			CollectKillMoves();
@@ -478,7 +432,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
 	SetupLog();
-	spdlog::info("FalkosKampf 0.2.0 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
+	spdlog::info("FalkosKampf 0.3.0 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
 
 	SKSE::AllocTrampoline(64);
 	MeleeHitHook::Install();

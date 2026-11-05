@@ -20,7 +20,7 @@ def package(dll, pdb, hkx, out):
         z.write(dll, "SKSE/Plugins/FalkosKampf.dll")
         if pdb and Path(pdb).exists():
             z.write(pdb, "SKSE/Plugins/FalkosKampf.pdb")
-        for f in sorted((ROOT / "data").rglob("*")):
+        for f in sorted((ROOT / "data").rglob("*")) if (ROOT / "data").exists() else []:
             if f.is_file() and not (hkx and f.name == "fk_finisher.hkx"):
                 z.write(f, f.relative_to(ROOT / "data").as_posix())
         if hkx:

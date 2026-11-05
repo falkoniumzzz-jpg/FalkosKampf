@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(FalkosKampf VERSION 0.2.0 LANGUAGES C CXX)
+project(FalkosKampf VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,11 +19,8 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
 add_subdirectory(extern/CommonLibSSE-NG CommonLibSSE EXCLUDE_FROM_ALL)
 
-add_library(${PROJECT_NAME} SHARED
-	src/main.cpp
-	src/oar/OpenAnimationReplacer-ConditionTypes.cpp
-	src/oar/OpenAnimationReplacerAPI-Conditions.cpp)
-target_include_directories(${PROJECT_NAME} PRIVATE src src/oar)
+add_library(${PROJECT_NAME} SHARED src/main.cpp)
+target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
 target_link_libraries(${PROJECT_NAME} PRIVATE CommonLibSSE::CommonLibSSE)

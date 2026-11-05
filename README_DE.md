@@ -1,33 +1,31 @@
 # FalkosKampf
 
-Vanilla-Animationen in neuen Kampfsituationen. Kein Pandora, kein Nemesis, kein FNIS, kein ESP.
+Vanilla-Animationen in neuen Kampfsituationen. Nur ein SKSE-Plugin: kein Pandora, Nemesis, FNIS,
+OAR oder ESP.
 
-**Status 0.2.0:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
+**Status 0.3.0:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
+(0.2.0 wurde im Spiel bestätigt: Block, Taumeln, Riposte im Stand, Killmove-Finisher.)
 
 ## Was diese Version macht
 
-1. **Block → verwundbar:** Blockst du einen Nahkampftreffer, taumelt der Angreifer 3 Sekunden
-   (Vanilla-Taumeln, wird wiederholt ausgelöst).
-2. **Riposte-Animation (OAR):** Solange ein verwundbarer Gegner vor dir steht (höchstens etwa
-   4 m, grob in Blickrichtung) und du ein Einhandschwert, eine Einhandaxt oder einen
-   Streitkolben gezogen hast, ersetzt OAR deinen normalen Einhand-Angriff im Stand durch den
-   Vanilla-Zweihand-Schlag (`2hm_attackright` / `2hm_attackleft`).
-3. **Riposte-Schaden:** Dein erster Treffer auf den verwundbaren Gegner macht doppelten Schaden
-   und beendet die Verwundbarkeit.
-4. **Finisher:** Würde die Riposte einen menschenähnlichen Gegner töten, startet stattdessen ein
-   Vanilla-Killmove passend zu deiner Waffe. Am Ende stirbt der Gegner normal (mit Ragdoll und
-   Kill für dich). Klappt der Killmove nicht, stirbt er sofort normal.
-
-Power-Attacken und alles andere bleiben Vanilla. NPCs können (noch) nicht parieren.
+1. **Block → verwundbar:** Blockst du einen Nahkampftreffer, taumelt der Angreifer 3 Sekunden.
+2. **Riposte:** Dein erster Treffer auf den verwundbaren Gegner macht doppelten Schaden, mit
+   deinem normalen Angriff (auch in Bewegung).
+3. **Killmoves 100 %:** Jeder deiner Nahkampftreffer, der einen menschenähnlichen,
+   nicht-essentiellen Gegner töten würde, startet einen Vanilla-Killmove passend zu deiner Waffe,
+   auch wenn noch andere Gegner da sind. Am Ende stirbt der Gegner normal (Ragdoll, Kill für dich).
+   Ausnahmen: zu Pferd, oder während schon ein Killmove läuft.
+4. **Freie Kamera:** Während des Killmoves verlässt das Plugin die Killmove-Kamera und gibt das
+   Umsehen wieder frei.
 
 ## Voraussetzungen
 
-SKSE (AE), Address Library for SKSE Plugins, Open Animation Replacer.
+SKSE (AE), Address Library for SKSE Plugins.
 
 ## Installation (MO2)
 
-`FalkosKampf-MO2.zip` über „Mod aus Archiv installieren“ installieren und aktivieren. Kein
-Pandora-Lauf nötig. Eine alte FalkosKampf-Version vorher entfernen.
+Alte FalkosKampf-Version löschen, `FalkosKampf-MO2.zip` installieren und aktivieren. VioLens und
+Valhalla Combat für Tests deaktivieren.
 
 ## Log
 
