@@ -1,28 +1,33 @@
-# FalkosKampf – Test 1
+# FalkosKampf
 
-**Status:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
+Vanilla-Animationen in neuen Kampfsituationen. Kein Pandora, kein Nemesis, kein FNIS, kein ESP.
 
-## Was dieser Test macht
+**Status 0.2.0:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
 
-- Du blockst einen Nahkampftreffer (normaler Block, kein Parierfenster). Der Angreifer taumelt
-  dann 3 Sekunden lang (Vanilla-Taumel-Animation, wird wiederholt ausgelöst).
-- Greifst du in dieser Zeit einen taumelnden Gegner an (rechte Angriffstaste, Waffe gezogen,
-  Gegner höchstens etwa 4 m entfernt und grob vor dir), spielt statt deines normalen
-  Angriffs die Finisher-Animation `fk_finisher.hkx` (eine Kopie von `2hm_attackleft.hkx`).
-  Das gilt mit jeder Waffe.
-- Beim Treffer-Moment der Animation (`HitFrame`) stirbt der Gegner sofort. Kommt kein
-  `HitFrame`, stirbt er nach 1 Sekunde. Essentielle NPCs fallen nur auf 0 Lebenspunkte.
-- Power-Attacken bleiben unverändert. Nur der Spieler kann das, NPCs nicht.
+## Was diese Version macht
+
+1. **Block → verwundbar:** Blockst du einen Nahkampftreffer, taumelt der Angreifer 3 Sekunden
+   (Vanilla-Taumeln, wird wiederholt ausgelöst).
+2. **Riposte-Animation (OAR):** Solange ein verwundbarer Gegner vor dir steht (höchstens etwa
+   4 m, grob in Blickrichtung) und du ein Einhandschwert, eine Einhandaxt oder einen
+   Streitkolben gezogen hast, ersetzt OAR deinen normalen Einhand-Angriff im Stand durch den
+   Vanilla-Zweihand-Schlag (`2hm_attackright` / `2hm_attackleft`).
+3. **Riposte-Schaden:** Dein erster Treffer auf den verwundbaren Gegner macht doppelten Schaden
+   und beendet die Verwundbarkeit.
+4. **Finisher:** Würde die Riposte einen menschenähnlichen Gegner töten, startet stattdessen ein
+   Vanilla-Killmove passend zu deiner Waffe. Am Ende stirbt der Gegner normal (mit Ragdoll und
+   Kill für dich). Klappt der Killmove nicht, stirbt er sofort normal.
+
+Power-Attacken und alles andere bleiben Vanilla. NPCs können (noch) nicht parieren.
 
 ## Voraussetzungen
 
-SKSE (AE), Address Library for SKSE Plugins, Pandora Behaviour Engine+.
+SKSE (AE), Address Library for SKSE Plugins, Open Animation Replacer.
 
 ## Installation (MO2)
 
-1. `FalkosKampf-MO2.zip` über „Mod aus Archiv installieren“ installieren und aktivieren.
-2. **Pandora ausführen** (über MO2 starten) und die Ausgabe wie gewohnt aktivieren. Ohne
-   diesen Schritt kennt das Spiel die Finisher-Animation nicht.
+`FalkosKampf-MO2.zip` über „Mod aus Archiv installieren“ installieren und aktivieren. Kein
+Pandora-Lauf nötig. Eine alte FalkosKampf-Version vorher entfernen.
 
 ## Log
 

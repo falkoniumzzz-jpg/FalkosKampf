@@ -1,11 +1,20 @@
-// FalkosKampf test 1: a blocked hit staggers the attacker for a few seconds.
-// Attacking a staggered enemy plays the Pandora/FNIS idle "FKFinisher" instead
-// of the normal attack and kills the enemy on the animation's hit frame.
+// FalkosKampf 0.2: vanilla animations in new situations.
+//
+// 1. A blocked melee hit staggers the attacker for a few seconds (vulnerable).
+// 2. While a vulnerable enemy is in front of the player, the OAR condition
+//    FK_RiposteReady is true, so OAR swaps the player's one-handed attack for a
+//    vanilla two-handed swing (files in OpenAnimationReplacer/FalkosKampf).
+// 3. The first player hit on a vulnerable enemy is the riposte: damage x2.
+// 4. If the riposte would kill a humanoid enemy, a vanilla paired killmove
+//    plays instead and the enemy dies at its end.
+// No Pandora/Nemesis/FNIS, no ESP.
 
 #include "PCH.h"
 
+#include "oar/OpenAnimationReplacerAPI-Conditions.h"
+
 SKSEPluginInfo(
-	.Version = REL::Version{ 0, 1, 0, 0 },
+	.Version = REL::Version{ 0, 2, 0, 0 },
 	.Name = "FalkosKampf"sv,
 	.Author = "Falko"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -16,10 +25,11 @@ namespace
 	constexpr float kStunSeconds = 3.0f;
 	constexpr float kRestaggerInterval = 0.35f;
 	constexpr float kStaggerMagnitude = 1.0f;
-	constexpr float kFinisherRange = 300.0f;      // game units (about 4 m)
-	constexpr float kFinisherMaxAngle = 75.0f;    // degrees off the player's facing
-	constexpr float kKillFallbackSeconds = 1.0f;  // when the idle sends no HitFrame
-	constexpr const char* kFinisherEvent = "FKFinisher";
+	constexpr float kRiposteDamageMult = 2.0f;
+	constexpr float kRiposteRange = 300.0f;      // game units (about 4 m)
+	constexpr float kRiposteMaxAngle = 75.0f;    // degrees off the player's facing
+	constexpr float kKillMoveTimeout = 6.0f;     // seconds until the victim dies anyway
+	constexpr float kKillMoveNoStartTimeout = 3.0f;
 
 	struct Stunned
 	{
@@ -32,19 +42,24 @@ namespace
 	{
 		RE::ActorHandle target;
 		float           elapsed{ 0.0f };
-		bool            active{ false };
+		bool            sawKillMove{ false };
 	};
 
-	// All game state below is touched on the main thread only. Event sinks that
-	// may run elsewhere forward their work through the SKSE task queue.
-	std::vector<Stunned> g_stunned;
-	Finisher             g_finisher;
-	bool                 g_swallowAttack = false;
-	std::atomic_bool     g_hitFrame{ false };
+	// g_stunned is shared between the main thread and the melee hit hook.
+	std::mutex            g_lock;
+	std::vector<Stunned>  g_stunned;
+	std::vector<Finisher> g_finishers;
+	std::atomic_bool      g_riposteReady{ false };  // read by OAR on animation threads
 
-	const char* NameOf(RE::Actor* a_actor)
+	std::vector<RE::TESIdleForm*> g_killMoves1H;
+	std::vector<RE::TESIdleForm*> g_killMoves2H;
+	std::vector<RE::TESIdleForm*> g_killMoves2HW;
+	std::vector<RE::TESIdleForm*> g_killMovesDW;
+	std::vector<RE::TESIdleForm*> g_killMovesH2H;
+
+	const char* NameOf(RE::TESObjectREFR* a_ref)
 	{
-		const char* name = a_actor ? a_actor->GetName() : nullptr;
+		const char* name = a_ref ? a_ref->GetName() : nullptr;
 		return name && *name ? name : "<unnamed>";
 	}
 
@@ -62,6 +77,29 @@ namespace
 		spdlog::set_default_logger(std::move(log));
 	}
 
+	std::string Lower(std::string_view a_text)
+	{
+		std::string out(a_text);
+		std::ranges::transform(out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return out;
+	}
+
+	// ---- weapon helpers -------------------------------------------------
+
+	RE::TESObjectWEAP* RightHandWeapon(RE::Actor* a_actor)
+	{
+		auto* form = a_actor ? a_actor->GetEquippedObject(false) : nullptr;
+		return form ? form->As<RE::TESObjectWEAP>() : nullptr;
+	}
+
+	bool HasOneHandedMelee(RE::Actor* a_actor)
+	{
+		auto* weapon = RightHandWeapon(a_actor);
+		return weapon && (weapon->IsOneHandedSword() || weapon->IsOneHandedAxe() || weapon->IsOneHandedMace());
+	}
+
+	// ---- stagger state --------------------------------------------------
+
 	void Stagger(RE::Actor* a_actor, RE::Actor* a_source)
 	{
 		// staggerDirection is 0..1 around the actor, 0 = source in front.
@@ -72,35 +110,33 @@ namespace
 		a_actor->NotifyAnimationGraph("staggerStart");
 	}
 
-	Stunned* FindStunned(RE::Actor* a_actor)
+	// Caller holds g_lock.
+	std::vector<Stunned>::iterator FindStunned(RE::Actor* a_actor)
 	{
-		for (auto& entry : g_stunned) {
-			if (entry.actor.get().get() == a_actor) {
-				return &entry;
-			}
-		}
-		return nullptr;
+		return std::ranges::find_if(g_stunned, [a_actor](const Stunned& s) { return s.actor.get().get() == a_actor; });
 	}
 
 	void StartStun(RE::Actor* a_attacker)
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!player || !a_attacker || a_attacker == player || a_attacker->IsDead()) {
+		if (!player || !a_attacker || a_attacker == player || a_attacker->IsDead() || a_attacker->IsInKillMove()) {
 			return;
 		}
-		if (auto* entry = FindStunned(a_attacker)) {
-			entry->remaining = kStunSeconds;
-		} else {
-			g_stunned.push_back({ a_attacker->GetHandle(), kStunSeconds, 0.0f });
+		{
+			std::scoped_lock lock(g_lock);
+			if (auto it = FindStunned(a_attacker); it != g_stunned.end()) {
+				it->remaining = kStunSeconds;
+			} else {
+				g_stunned.push_back({ a_attacker->GetHandle(), kStunSeconds, 0.0f });
+			}
 		}
 		Stagger(a_attacker, player);
-		spdlog::info("Block: {} taumelt fuer {:.1f} s", NameOf(a_attacker), kStunSeconds);
+		spdlog::info("Block: {} taumelt fuer {:.1f} s (verwundbar)", NameOf(a_attacker), kStunSeconds);
 	}
 
-	RE::Actor* FindFinisherTarget(RE::PlayerCharacter* a_player)
+	// Caller holds g_lock.
+	bool HasRiposteTarget(RE::PlayerCharacter* a_player)
 	{
-		RE::Actor* best = nullptr;
-		float      bestDistance = kFinisherRange;
 		for (auto& entry : g_stunned) {
 			auto actor = entry.actor.get();
 			if (!actor || actor->IsDead()) {
@@ -108,66 +144,142 @@ namespace
 			}
 			const float distance = a_player->GetPosition().GetDistance(actor->GetPosition());
 			const float angle = std::abs(a_player->GetHeadingAngle(actor->GetPosition(), false));
-			if (distance <= bestDistance && angle <= kFinisherMaxAngle) {
-				best = actor.get();
-				bestDistance = distance;
+			if (distance <= kRiposteRange && angle <= kRiposteMaxAngle) {
+				return true;
 			}
 		}
-		return best;
+		return false;
 	}
 
-	void StartFinisher(RE::PlayerCharacter* a_player, RE::Actor* a_target)
+	// ---- finisher -------------------------------------------------------
+
+	void CollectKillMoves()
 	{
-		g_hitFrame = false;
-		g_finisher = { a_target->GetHandle(), 0.0f, true };
-		if (auto* entry = FindStunned(a_target)) {
-			entry->remaining = (std::max)(entry->remaining, kKillFallbackSeconds + 0.5f);
+		auto* data = RE::TESDataHandler::GetSingleton();
+		if (!data) {
+			return;
 		}
-		const bool accepted = a_player->NotifyAnimationGraph(kFinisherEvent);
-		if (accepted) {
-			spdlog::info("Finisher gegen {} gestartet", NameOf(a_target));
-		} else {
-			spdlog::warn("Finisher gegen {}: Animation '{}' wurde nicht angenommen "
-						 "(Pandora nicht ausgefuehrt?). Gegner stirbt trotzdem.",
-				NameOf(a_target), kFinisherEvent);
+		for (auto* idle : data->GetFormArray<RE::TESIdleForm>()) {
+			if (!idle) {
+				continue;
+			}
+			const auto file = Lower(idle->animFileName.c_str());
+			if (file.find("killmove") == std::string::npos || file.find("paired_") == std::string::npos ||
+				file.find("sneak") != std::string::npos) {
+				continue;
+			}
+			if (file.find("paired_1hm") != std::string::npos) {
+				g_killMoves1H.push_back(idle);
+			} else if (file.find("paired_2hm") != std::string::npos) {
+				g_killMoves2H.push_back(idle);
+			} else if (file.find("paired_2hw") != std::string::npos) {
+				g_killMoves2HW.push_back(idle);
+			} else if (file.find("paired_dw") != std::string::npos) {
+				g_killMovesDW.push_back(idle);
+			} else if (file.find("paired_h2h") != std::string::npos) {
+				g_killMovesH2H.push_back(idle);
+			}
 		}
+		spdlog::info("Killmoves gefunden: 1H {}, 2H {}, Axt/Hammer {}, Doppelwaffen {}, Faust {}",
+			g_killMoves1H.size(), g_killMoves2H.size(), g_killMoves2HW.size(), g_killMovesDW.size(), g_killMovesH2H.size());
 	}
 
-	void Kill(RE::Actor* a_target)
+	RE::TESIdleForm* PickKillMove(RE::PlayerCharacter* a_player)
 	{
+		const std::vector<RE::TESIdleForm*>* pool = &g_killMoves1H;
+		auto* right = RightHandWeapon(a_player);
+		auto* leftForm = a_player->GetEquippedObject(true);
+		auto* left = leftForm ? leftForm->As<RE::TESObjectWEAP>() : nullptr;
+		if (!right) {
+			pool = &g_killMovesH2H;
+		} else if (right->IsTwoHandedSword()) {
+			pool = &g_killMoves2H;
+		} else if (right->IsTwoHandedAxe()) {
+			pool = &g_killMoves2HW;
+		} else if (left && left->IsMelee() && !left->IsHandToHandMelee()) {
+			pool = &g_killMovesDW;
+		}
+		if (pool->empty()) {
+			pool = &g_killMoves1H;
+		}
+		if (pool->empty()) {
+			return nullptr;
+		}
+		static std::mt19937 rng{ std::random_device{}() };
+		std::uniform_int_distribution<std::size_t> pick(0, pool->size() - 1);
+		return (*pool)[pick(rng)];
+	}
+
+	void KillNow(RE::Actor* a_target)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!a_target || a_target->IsDead()) {
 			return;
 		}
+		auto* values = a_target->AsActorValueOwner();
+		const float health = values->GetActorValue(RE::ActorValue::kHealth);
 		if (a_target->IsEssential()) {
-			auto* values = a_target->AsActorValueOwner();
-			values->DamageActorValue(RE::ActorValue::kHealth, values->GetActorValue(RE::ActorValue::kHealth) + 1.0f);
+			values->DamageActorValue(RE::ActorValue::kHealth, health + 1.0f);
 			spdlog::info("Finisher: {} ist essentiell, nur Lebenspunkte auf 0", NameOf(a_target));
 			return;
 		}
-		a_target->KillImmediate();
+		// Normal death with kill credit and ragdoll transition.
+		a_target->KillImpl(player, health + 1.0f, true, false);
 		spdlog::info("Finisher: {} getoetet", NameOf(a_target));
 	}
 
+	void StartFinisher(RE::Actor* a_target)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player || !a_target || a_target->IsDead()) {
+			return;
+		}
+		auto* idle = PickKillMove(player);
+		auto* process = player->GetActorRuntimeData().currentProcess;
+		const bool started = idle && process && process->PlayIdle(player, idle, a_target);
+		if (!started) {
+			spdlog::warn("Finisher gegen {}: Killmove {} nicht gestartet, normaler Tod",
+				NameOf(a_target), idle ? idle->GetFormEditorID() : "<keiner>");
+			KillNow(a_target);
+			return;
+		}
+		spdlog::info("Finisher gegen {}: Killmove {} ({})", NameOf(a_target), idle->GetFormEditorID(), idle->animFileName.c_str());
+		g_finishers.push_back({ a_target->GetHandle(), 0.0f, false });
+	}
+
+	// ---- per-frame update -----------------------------------------------
+
 	void Tick(RE::PlayerCharacter* a_player, float a_delta)
 	{
-		if (g_finisher.active) {
-			g_finisher.elapsed += a_delta;
-			const bool hit = g_hitFrame.exchange(false);
-			if (hit || g_finisher.elapsed >= kKillFallbackSeconds) {
-				auto target = g_finisher.target.get();
-				if (!hit) {
-					spdlog::info("Finisher: kein HitFrame nach {:.1f} s, Treffer per Zeit", kKillFallbackSeconds);
-				}
-				Kill(target.get());
-				g_finisher = {};
+		for (auto it = g_finishers.begin(); it != g_finishers.end();) {
+			auto target = it->target.get();
+			it->elapsed += a_delta;
+			if (!target || target->IsDead()) {
+				it = g_finishers.erase(it);
+				continue;
 			}
+			if (target->IsInKillMove()) {
+				it->sawKillMove = true;
+			}
+			const bool ended = it->sawKillMove && !target->IsInKillMove();
+			const bool timeout = it->elapsed >= (it->sawKillMove ? kKillMoveTimeout : kKillMoveNoStartTimeout);
+			if (ended || timeout) {
+				if (!it->sawKillMove) {
+					spdlog::warn("Finisher: Killmove-Zustand nie gesehen, Tod nach {:.1f} s", it->elapsed);
+				}
+				KillNow(target.get());
+				it = g_finishers.erase(it);
+				continue;
+			}
+			++it;
 		}
 
+		std::scoped_lock lock(g_lock);
 		for (auto it = g_stunned.begin(); it != g_stunned.end();) {
 			auto actor = it->actor.get();
 			it->remaining -= a_delta;
 			it->sinceStagger += a_delta;
-			if (!actor || actor->IsDead() || it->remaining <= 0.0f) {
+			if (!actor || actor->IsDead() || actor->IsInKillMove() || it->remaining <= 0.0f) {
 				it = g_stunned.erase(it);
 				continue;
 			}
@@ -177,72 +289,80 @@ namespace
 			}
 			++it;
 		}
+
+		const bool ready = a_player->AsActorState()->IsWeaponDrawn() && HasOneHandedMelee(a_player) && HasRiposteTarget(a_player);
+		if (ready != g_riposteReady.exchange(ready)) {
+			spdlog::info("Riposte bereit: {}", ready ? "ja" : "nein");
+		}
 	}
 
 	void ResetState()
 	{
+		std::scoped_lock lock(g_lock);
 		g_stunned.clear();
-		g_finisher = {};
-		g_swallowAttack = false;
-		g_hitFrame = false;
+		g_finishers.clear();
+		g_riposteReady = false;
 	}
 
-	// Returns true when the button event is consumed and must not reach the game.
-	bool InterceptAttack(RE::ButtonEvent* a_event)
-	{
-		auto* userEvents = RE::UserEvents::GetSingleton();
-		if (!userEvents || a_event->QUserEvent() != userEvents->rightAttack) {
-			return false;
-		}
-		if (!a_event->IsDown()) {
-			// Hold and release of a press we consumed stay with us, so no power
-			// attack or release attack starts after the finisher.
-			if (g_swallowAttack) {
-				if (a_event->IsUp()) {
-					g_swallowAttack = false;
-				}
-				return true;
-			}
-			return false;
-		}
+	// ---- melee hit: riposte damage and finisher decision ----------------
 
-		g_swallowAttack = false;
+	void OnMeleeHit(RE::Actor* a_victim, RE::HitData& a_hitData)
+	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!player || !player->AsActorState()->IsWeaponDrawn()) {
-			return false;
+		auto attacker = a_hitData.aggressor.get();
+		if (!player || !a_victim || attacker.get() != player || a_victim->IsDead()) {
+			return;
 		}
-		if (g_finisher.active) {
-			g_swallowAttack = true;
-			return true;
-		}
-		auto* target = FindFinisherTarget(player);
-		if (!target) {
-			return false;
-		}
-		StartFinisher(player, target);
-		g_swallowAttack = true;
-		return true;
-	}
-
-	struct AttackBlockHook
-	{
-		static void ProcessButton(RE::AttackBlockHandler* a_this, RE::ButtonEvent* a_event, RE::PlayerControlsData* a_data)
 		{
-			if (a_event && InterceptAttack(a_event)) {
+			std::scoped_lock lock(g_lock);
+			auto it = FindStunned(a_victim);
+			if (it == g_stunned.end()) {
 				return;
 			}
-			_original(a_this, a_event, a_data);
+			g_stunned.erase(it);  // one riposte per vulnerability
+		}
+
+		const float base = a_hitData.totalDamage;
+		const float riposte = base * kRiposteDamageMult;
+		const float health = a_victim->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
+		const bool humanoid = a_victim->HasKeywordString("ActorTypeNPC");
+		if (riposte >= health && humanoid && !a_victim->IsEssential()) {
+			a_hitData.totalDamage = 0.0f;
+			spdlog::info("Riposte gegen {}: {:.0f} Schaden waere toedlich ({:.0f} Leben), Finisher", NameOf(a_victim), riposte, health);
+			auto handle = a_victim->GetHandle();
+			SKSE::GetTaskInterface()->AddTask([handle]() {
+				if (auto victim = handle.get()) {
+					StartFinisher(victim.get());
+				}
+			});
+			return;
+		}
+		a_hitData.totalDamage = riposte;
+		spdlog::info("Riposte gegen {}: {:.0f} -> {:.0f} Schaden ({:.0f} Leben)", NameOf(a_victim), base, riposte, health);
+	}
+
+	struct MeleeHitHook
+	{
+		static void ProcessHit(RE::Actor* a_victim, RE::HitData& a_hitData)
+		{
+			OnMeleeHit(a_victim, a_hitData);
+			_original(a_victim, a_hitData);
 		}
 
 		static void Install()
 		{
-			// Runtime 1.7.99 inserted two input handler slots before ProcessButton.
-			const std::size_t slot = REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_7_99) ? 0x06 : 0x04;
-			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_AttackBlockHandler[0] };
-			_original = vtbl.write_vfunc(slot, ProcessButton);
+			// HitActor -> ProcessHit call, the same site Valhalla Combat uses.
+			REL::Relocation<std::uintptr_t> function{ RELOCATION_ID(37673, 38627) };
+			const std::uintptr_t site = function.address() + REL::Relocate(0x3C0, 0x4A8);
+			if (*reinterpret_cast<const std::uint8_t*>(site) != 0xE8) {
+				spdlog::error("Treffer-Hook: unerwarteter Code an {:X}, Riposte-Schaden deaktiviert", site);
+				return;
+			}
+			_original = SKSE::GetTrampoline().write_call<5>(site, ProcessHit);
+			spdlog::info("Treffer-Hook installiert");
 		}
 
-		static inline REL::Relocation<decltype(ProcessButton)> _original;
+		static inline REL::Relocation<decltype(ProcessHit)> _original;
 	};
 
 	struct PlayerUpdateHook
@@ -292,46 +412,61 @@ namespace
 		}
 	};
 
-	class AnimationSink final : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
+	// ---- OAR condition --------------------------------------------------
+
+	class RiposteReadyCondition : public Conditions::CustomCondition
 	{
 	public:
-		static AnimationSink* GetSingleton()
+		constexpr static inline std::string_view CONDITION_NAME = "FK_RiposteReady"sv;
+
+		[[nodiscard]] RE::BSString GetName() const override { return CONDITION_NAME.data(); }
+		[[nodiscard]] RE::BSString GetDescription() const override
 		{
-			static AnimationSink sink;
-			return &sink;
+			return "FalkosKampf: true for the player while a vulnerable enemy is in riposte range and a one-handed melee weapon is drawn."sv.data();
+		}
+		[[nodiscard]] REL::Version GetRequiredVersion() const override { return { 0, 2, 0 }; }
+		[[nodiscard]] RE::BSString GetCurrent(RE::TESObjectREFR* a_refr) const override
+		{
+			return EvaluateImpl(a_refr, nullptr, nullptr) ? "true" : "false";
 		}
 
-		RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>*) override
+	protected:
+		bool EvaluateImpl(RE::TESObjectREFR* a_refr, [[maybe_unused]] RE::hkbClipGenerator* a_clipGenerator, [[maybe_unused]] void* a_subMod) const override
 		{
-			if (a_event && a_event->tag == "HitFrame"sv) {
-				g_hitFrame = true;
-			}
-			return RE::BSEventNotifyControl::kContinue;
+			return a_refr && a_refr->IsPlayerRef() && g_riposteReady.load();
 		}
 	};
 
-	void RegisterPlayerAnimationSink()
+	void RegisterOARCondition()
 	{
-		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!player) {
-			return;
+		const auto result = OAR_API::Conditions::AddCustomCondition<RiposteReadyCondition>();
+		switch (result) {
+		case OAR_API::Conditions::APIResult::OK:
+			spdlog::info("OAR-Bedingung {} angemeldet", RiposteReadyCondition::CONDITION_NAME);
+			break;
+		case OAR_API::Conditions::APIResult::AlreadyRegistered:
+			spdlog::info("OAR-Bedingung {} war schon angemeldet", RiposteReadyCondition::CONDITION_NAME);
+			break;
+		default:
+			spdlog::error("OAR-Bedingung konnte nicht angemeldet werden (OAR fehlt oder zu alt). Riposte-Animation inaktiv.");
+			break;
 		}
-		player->RemoveAnimationGraphEventSink(AnimationSink::GetSingleton());
-		const bool ok = player->AddAnimationGraphEventSink(AnimationSink::GetSingleton());
-		spdlog::info("Animations-Events des Spielers: {}", ok ? "verbunden" : "FEHLER");
 	}
 
 	void OnMessage(SKSE::MessagingInterface::Message* a_message)
 	{
 		switch (a_message->type) {
+		case SKSE::MessagingInterface::kPostLoad:
+			RegisterOARCondition();
+			break;
 		case SKSE::MessagingInterface::kDataLoaded:
 			RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(HitSink::GetSingleton());
+			CollectKillMoves();
 			spdlog::info("Treffer-Events verbunden");
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:
 			ResetState();
-			RegisterPlayerAnimationSink();
 			break;
 		default:
 			break;
@@ -343,9 +478,10 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
 	SetupLog();
-	spdlog::info("FalkosKampf 0.1.0 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
+	spdlog::info("FalkosKampf 0.2.0 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
 
-	AttackBlockHook::Install();
+	SKSE::AllocTrampoline(64);
+	MeleeHitHook::Install();
 	PlayerUpdateHook::Install();
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	spdlog::info("Hooks installiert");

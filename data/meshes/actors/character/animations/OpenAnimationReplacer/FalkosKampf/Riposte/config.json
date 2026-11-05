@@ -1,0 +1,12 @@
+{
+	"name": "Riposte",
+	"description": "One-handed attacks become the vanilla two-handed swing while a vulnerable (staggered) enemy is in front of the player.",
+	"priority": 2100000000,
+	"conditions": [
+		{
+			"condition": "FK_RiposteReady",
+			"requiredPlugin": "FalkosKampf",
+			"requiredVersion": "0.2.0"
+		}
+	]
+}
