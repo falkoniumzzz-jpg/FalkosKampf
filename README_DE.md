@@ -3,7 +3,7 @@
 Vanilla-Animationen in neuen Kampfsituationen. Nur ein SKSE-Plugin: kein Pandora, Nemesis, FNIS,
 OAR oder ESP.
 
-**Status 0.3.0:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
+**Status 0.3.1:** implementiert. Gebaut erst, wenn der CI-Lauf grün ist. **Im Spiel noch nicht bestätigt.**
 (0.2.0 wurde im Spiel bestätigt: Block, Taumeln, Riposte im Stand, Killmove-Finisher.)
 
 ## Was diese Version macht
@@ -17,6 +17,8 @@ OAR oder ESP.
    Ausnahmen: zu Pferd, oder während schon ein Killmove läuft.
 4. **Freie Kamera:** Während des Killmoves verlässt das Plugin die Killmove-Kamera und gibt das
    Umsehen wieder frei.
+5. **Nazeem:** Triffst du Nazeem im Nahkampf mit einem Einhandschwert, startet sofort der
+   Vanilla-Killmove J (`paired_1hmkillmovej`), egal wie viel Leben er hat.
 
 ## Voraussetzungen
 

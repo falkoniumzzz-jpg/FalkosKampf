@@ -6,12 +6,13 @@
 // 3. Every player melee hit that would kill a humanoid enemy plays a vanilla
 //    paired killmove instead (100 %); the enemy dies normally at its end.
 //    The camera stays free during the killmove.
+// 4. Nazeem: any one-handed sword hit by the player plays killmove J.
 // No Pandora/Nemesis/FNIS/OAR, no ESP.
 
 #include "PCH.h"
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 0, 3, 0, 0 },
+	.Version = REL::Version{ 0, 3, 1, 0 },
 	.Name = "FalkosKampf"sv,
 	.Author = "Falko"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -51,6 +52,9 @@ namespace
 	std::vector<RE::TESIdleForm*> g_killMoves2HW;
 	std::vector<RE::TESIdleForm*> g_killMovesDW;
 	std::vector<RE::TESIdleForm*> g_killMovesH2H;
+	RE::TESIdleForm*              g_nazeemKillMove = nullptr;  // vanilla killmove J
+
+	constexpr RE::FormID kNazeemBaseID = 0x13BBF;  // Skyrim.esm
 
 	const char* NameOf(RE::TESObjectREFR* a_ref)
 	{
@@ -140,6 +144,9 @@ namespace
 				file.find("sneak") != std::string::npos) {
 				continue;
 			}
+			if (file.ends_with("paired_1hmkillmovej.hkx")) {
+				g_nazeemKillMove = idle;
+			}
 			if (file.find("paired_1hm") != std::string::npos) {
 				g_killMoves1H.push_back(idle);
 			} else if (file.find("paired_2hm") != std::string::npos) {
@@ -154,6 +161,14 @@ namespace
 		}
 		spdlog::info("Killmoves gefunden: 1H {}, 2H {}, Axt/Hammer {}, Doppelwaffen {}, Faust {}",
 			g_killMoves1H.size(), g_killMoves2H.size(), g_killMoves2HW.size(), g_killMovesDW.size(), g_killMovesH2H.size());
+		spdlog::info("Nazeem-Killmove (J): {}", g_nazeemKillMove ? g_nazeemKillMove->GetFormEditorID() : "NICHT GEFUNDEN");
+	}
+
+	bool IsNazeem(RE::Actor* a_actor)
+	{
+		static RE::TESForm* nazeem = RE::TESDataHandler::GetSingleton()->LookupForm(kNazeemBaseID, "Skyrim.esm"sv);
+		auto* base = a_actor ? a_actor->GetActorBase() : nullptr;
+		return nazeem && base && (base == nazeem || base->GetRootFaceNPC() == nazeem);
 	}
 
 	RE::TESIdleForm* PickKillMove(RE::PlayerCharacter* a_player)
@@ -200,13 +215,13 @@ namespace
 		spdlog::info("Finisher: {} getoetet", NameOf(a_target));
 	}
 
-	void StartFinisher(RE::Actor* a_target)
+	void StartFinisher(RE::Actor* a_target, RE::TESIdleForm* a_idle = nullptr)
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!player || !a_target || a_target->IsDead()) {
 			return;
 		}
-		auto* idle = PickKillMove(player);
+		auto* idle = a_idle ? a_idle : PickKillMove(player);
 		auto* process = player->GetActorRuntimeData().currentProcess;
 		const bool started = idle && process && process->PlayIdle(player, idle, a_target);
 		if (!started) {
@@ -321,6 +336,24 @@ namespace
 		const bool lethal = a_hitData.totalDamage >= health;
 		const bool canKillMove = a_victim->HasKeywordString("ActorTypeNPC") && !a_victim->IsEssential() &&
 		                         !player->IsInKillMove() && !player->IsOnMount() && g_finishers.empty();
+
+		// Nazeem: any one-handed sword hit ends in killmove J.
+		auto* sword = RightHandWeapon(player);
+		if (g_nazeemKillMove && sword && sword->IsOneHandedSword() && IsNazeem(a_victim)) {
+			if (canKillMove) {
+				spdlog::info("Nazeem getroffen: Killmove J");
+				a_hitData.totalDamage = 0.0f;
+				auto handle = a_victim->GetHandle();
+				SKSE::GetTaskInterface()->AddTask([handle]() {
+					if (auto victim = handle.get()) {
+						StartFinisher(victim.get(), g_nazeemKillMove);
+					}
+				});
+				return;
+			}
+			spdlog::info("Nazeem getroffen, aber Killmove nicht moeglich (essentiell: {})", a_victim->IsEssential());
+		}
+
 		if (lethal && canKillMove) {
 			spdlog::info("{}gegen {}: {:.0f} Schaden waere toedlich ({:.0f} Leben), Killmove",
 				riposte ? "Riposte " : "Treffer ", NameOf(a_victim), a_hitData.totalDamage, health);
@@ -432,7 +465,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
 	SetupLog();
-	spdlog::info("FalkosKampf 0.3.0 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
+	spdlog::info("FalkosKampf 0.3.1 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
 
 	SKSE::AllocTrampoline(64);
 	MeleeHitHook::Install();
