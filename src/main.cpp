@@ -6,13 +6,12 @@
 // 3. Every player melee hit that would kill a humanoid enemy plays a vanilla
 //    paired killmove instead (100 %); the enemy dies normally at its end.
 //    The camera stays free during the killmove.
-// 4. Nazeem: any one-handed sword hit by the player plays killmove J.
 // No Pandora/Nemesis/FNIS/OAR, no ESP.
 
 #include "PCH.h"
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 0, 3, 1, 0 },
+	.Version = REL::Version{ 0, 3, 2, 0 },
 	.Name = "FalkosKampf"sv,
 	.Author = "Falko"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -45,6 +44,7 @@ namespace
 	std::mutex            g_lock;
 	std::vector<Stunned>  g_stunned;
 	std::vector<Finisher> g_finishers;
+	std::vector<std::pair<RE::ActorHandle, float>> g_pendingDeaths;  // KillImpl check
 	bool                  g_lookUnlocked = false;  // we re-enabled looking for a killmove
 
 	std::vector<RE::TESIdleForm*> g_killMoves1H;
@@ -52,9 +52,7 @@ namespace
 	std::vector<RE::TESIdleForm*> g_killMoves2HW;
 	std::vector<RE::TESIdleForm*> g_killMovesDW;
 	std::vector<RE::TESIdleForm*> g_killMovesH2H;
-	RE::TESIdleForm*              g_nazeemKillMove = nullptr;  // vanilla killmove J
-
-	constexpr RE::FormID kNazeemBaseID = 0x13BBF;  // Skyrim.esm
+	std::vector<RE::TESIdleForm*> g_killMovesOther;  // no weapon tag in the name
 
 	const char* NameOf(RE::TESObjectREFR* a_ref)
 	{
@@ -129,46 +127,58 @@ namespace
 
 	// ---- finisher -------------------------------------------------------
 
+	bool Contains(const std::string& a_text, std::string_view a_token)
+	{
+		return a_text.find(a_token) != std::string::npos;
+	}
+
+	// Vanilla killmove idles are found by editor ID and animation event (e.g.
+	// "KillMoveJ", "KillMove1HMStabUpFace"); the idle's file field holds the
+	// behavior path, not the animation.
 	void CollectKillMoves()
 	{
 		auto* data = RE::TESDataHandler::GetSingleton();
 		if (!data) {
 			return;
 		}
+		int logged = 0;
 		for (auto* idle : data->GetFormArray<RE::TESIdleForm>()) {
 			if (!idle) {
 				continue;
 			}
-			const auto file = Lower(idle->animFileName.c_str());
-			if (file.find("killmove") == std::string::npos || file.find("paired_") == std::string::npos ||
-				file.find("sneak") != std::string::npos) {
+			const auto editorID = Lower(idle->GetFormEditorID());
+			const auto event = Lower(idle->animEventName.c_str());
+			if (event.empty() || (!Contains(editorID, "killmove") && !Contains(event, "killmove"))) {
 				continue;
 			}
-			if (file.ends_with("paired_1hmkillmovej.hkx")) {
-				g_nazeemKillMove = idle;
+			const std::string both = editorID + " " + event;
+			constexpr std::string_view kSkip[] = { "sneak", "sleep", "dragon", "vampire", "werewolf", "ww_", "horse",
+				"mount", "serana", "bite", "npc", "dlc", "end", "start", "modifier", "behavior", "state" };
+			if (std::ranges::any_of(kSkip, [&](std::string_view t) { return Contains(both, t); })) {
+				continue;
 			}
-			if (file.find("paired_1hm") != std::string::npos) {
+			if (logged < 60) {
+				spdlog::info("  Killmove-Eintrag {:08X} '{}' Event '{}' Datei '{}'", idle->GetFormID(),
+					idle->GetFormEditorID(), idle->animEventName.c_str(), idle->animFileName.c_str());
+				++logged;
+			}
+			if (Contains(both, "1hm")) {
 				g_killMoves1H.push_back(idle);
-			} else if (file.find("paired_2hm") != std::string::npos) {
+			} else if (Contains(both, "2hm")) {
 				g_killMoves2H.push_back(idle);
-			} else if (file.find("paired_2hw") != std::string::npos) {
+			} else if (Contains(both, "2hw")) {
 				g_killMoves2HW.push_back(idle);
-			} else if (file.find("paired_dw") != std::string::npos) {
+			} else if (Contains(both, "dw") || Contains(both, "dualwield")) {
 				g_killMovesDW.push_back(idle);
-			} else if (file.find("paired_h2h") != std::string::npos) {
+			} else if (Contains(both, "h2h")) {
 				g_killMovesH2H.push_back(idle);
+			} else {
+				g_killMovesOther.push_back(idle);
 			}
 		}
-		spdlog::info("Killmoves gefunden: 1H {}, 2H {}, Axt/Hammer {}, Doppelwaffen {}, Faust {}",
-			g_killMoves1H.size(), g_killMoves2H.size(), g_killMoves2HW.size(), g_killMovesDW.size(), g_killMovesH2H.size());
-		spdlog::info("Nazeem-Killmove (J): {}", g_nazeemKillMove ? g_nazeemKillMove->GetFormEditorID() : "NICHT GEFUNDEN");
-	}
-
-	bool IsNazeem(RE::Actor* a_actor)
-	{
-		static RE::TESForm* nazeem = RE::TESDataHandler::GetSingleton()->LookupForm(kNazeemBaseID, "Skyrim.esm"sv);
-		auto* base = a_actor ? a_actor->GetActorBase() : nullptr;
-		return nazeem && base && (base == nazeem || base->GetRootFaceNPC() == nazeem);
+		spdlog::info("Killmoves gefunden: 1H {}, 2H {}, Axt/Hammer {}, Doppelwaffen {}, Faust {}, ohne Waffenangabe {}",
+			g_killMoves1H.size(), g_killMoves2H.size(), g_killMoves2HW.size(), g_killMovesDW.size(), g_killMovesH2H.size(),
+			g_killMovesOther.size());
 	}
 
 	RE::TESIdleForm* PickKillMove(RE::PlayerCharacter* a_player)
@@ -185,6 +195,9 @@ namespace
 			pool = &g_killMoves2HW;
 		} else if (left && left->IsMelee() && !left->IsHandToHandMelee()) {
 			pool = &g_killMovesDW;
+		}
+		if (pool->empty()) {
+			pool = &g_killMovesOther;
 		}
 		if (pool->empty()) {
 			pool = &g_killMoves1H;
@@ -212,6 +225,7 @@ namespace
 		}
 		// Normal death with kill credit and ragdoll transition.
 		a_target->KillImpl(player, health + 1.0f, true, false);
+		g_pendingDeaths.emplace_back(a_target->GetHandle(), 0.0f);
 		spdlog::info("Finisher: {} getoetet", NameOf(a_target));
 	}
 
@@ -238,6 +252,23 @@ namespace
 
 	void Tick(RE::PlayerCharacter* a_player, float a_delta)
 	{
+		for (auto it = g_pendingDeaths.begin(); it != g_pendingDeaths.end();) {
+			auto actor = it->first.get();
+			it->second += a_delta;
+			if (!actor || actor->IsDead()) {
+				it = g_pendingDeaths.erase(it);
+				continue;
+			}
+			if (it->second >= 0.5f) {
+				auto* values = actor->AsActorValueOwner();
+				values->DamageActorValue(RE::ActorValue::kHealth, values->GetActorValue(RE::ActorValue::kHealth) + 1.0f);
+				spdlog::warn("Finisher: {} lebte nach dem Toeten noch, Lebenspunkte auf 0 gesetzt", NameOf(actor.get()));
+				it = g_pendingDeaths.erase(it);
+				continue;
+			}
+			++it;
+		}
+
 		for (auto it = g_finishers.begin(); it != g_finishers.end();) {
 			auto target = it->target.get();
 			it->elapsed += a_delta;
@@ -306,6 +337,7 @@ namespace
 		std::scoped_lock lock(g_lock);
 		g_stunned.clear();
 		g_finishers.clear();
+		g_pendingDeaths.clear();
 		g_lookUnlocked = false;
 	}
 
@@ -337,22 +369,6 @@ namespace
 		const bool canKillMove = a_victim->HasKeywordString("ActorTypeNPC") && !a_victim->IsEssential() &&
 		                         !player->IsInKillMove() && !player->IsOnMount() && g_finishers.empty();
 
-		// Nazeem: any one-handed sword hit ends in killmove J.
-		auto* sword = RightHandWeapon(player);
-		if (g_nazeemKillMove && sword && sword->IsOneHandedSword() && IsNazeem(a_victim)) {
-			if (canKillMove) {
-				spdlog::info("Nazeem getroffen: Killmove J");
-				a_hitData.totalDamage = 0.0f;
-				auto handle = a_victim->GetHandle();
-				SKSE::GetTaskInterface()->AddTask([handle]() {
-					if (auto victim = handle.get()) {
-						StartFinisher(victim.get(), g_nazeemKillMove);
-					}
-				});
-				return;
-			}
-			spdlog::info("Nazeem getroffen, aber Killmove nicht moeglich (essentiell: {})", a_victim->IsEssential());
-		}
 
 		if (lethal && canKillMove) {
 			spdlog::info("{}gegen {}: {:.0f} Schaden waere toedlich ({:.0f} Leben), Killmove",
@@ -465,7 +481,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
 	SetupLog();
-	spdlog::info("FalkosKampf 0.3.1 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
+	spdlog::info("FalkosKampf 0.3.2 geladen (Runtime {})", a_skse->RuntimeVersion().string("."));
 
 	SKSE::AllocTrampoline(64);
 	MeleeHitHook::Install();
